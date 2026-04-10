@@ -1,0 +1,23 @@
+# FIX #1 — "dateutil" is not a valid PyPI package name.
+#           The correct name is "python-dateutil".
+# FIX #2 — "SpeechRecognition" and "pydub" were completely missing.
+#           pydub is required by speech_to_text.py for MP3/M4A/OGG conversion.
+
+streamlit
+streamlit-webrtc
+PyAV
+spacy
+nltk
+transformers
+torch
+scikit-learn
+python-dotenv
+sentence-transformers
+faiss-cpu
+pandas
+numpy
+langdetect
+deep-translator
+python-dateutil
+SpeechRecognition
+pydub

@@ -1,0 +1,2 @@
+class DraftAgent:
+    pass

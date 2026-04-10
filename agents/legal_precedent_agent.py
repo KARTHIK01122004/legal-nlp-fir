@@ -1,0 +1,2 @@
+class LegalPrecedentAgent:
+    pass
