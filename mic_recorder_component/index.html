@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Mic Recorder</title>
+<style>
+  body {
+    margin: 0;
+    padding: 16px;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    background: #0f1319;
+    color: #e8edf5;
+  }
+  .container {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    align-items: stretch;
+  }
+  .status {
+    font-size: 0.95rem;
+    color: #8b9ab5;
+  }
+  .buttons {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+  button {
+    border: none;
+    border-radius: 10px;
+    padding: 12px 14px;
+    font-size: 0.95rem;
+    font-weight: 700;
+    cursor: pointer;
+    color: #fff;
+  }
+  button.primary { background: linear-gradient(135deg,#00c4a8,#009985); }
+  button.secondary { background: linear-gradient(135deg,#f87171,#dc2626); }
+  button.disabled { opacity: 0.5; cursor: not-allowed; }
+  audio {
+    width: 100%;
+    border-radius: 10px;
+    background: rgba(255,255,255,0.06);
+  }
+</style>
+</head>
+<body>
+  <div class="container">
+    <div class="status" id="recStatus">Ready — click START RECORDING to begin.</div>
+
+    <div class="buttons">
+      <button class="primary" id="startBtn">🎙️ START RECORDING</button>
+      <button class="secondary disabled" id="stopBtn" disabled>⏹️ STOP RECORDING</button>
+    </div>
+
+    <audio id="audioPlayer" controls style="display:none;" />
+    <div class="status" id="finalStatus"></div>
+  </div>
+
+<script>
+(function () {
+  function waitForStreamlit(cb) {
+    if (window.Streamlit) {
+      cb();
+    } else {
+      setTimeout(function () { waitForStreamlit(cb); }, 50);
+    }
+  }
+
+  waitForStreamlit(function () {
+    Streamlit.setComponentReady();
+    Streamlit.setFrameHeight(document.body.scrollHeight);
+  });
+
+  const startBtn = document.getElementById('startBtn');
+  const stopBtn = document.getElementById('stopBtn');
+  const recStatus = document.getElementById('recStatus');
+  const finalStatus = document.getElementById('finalStatus');
+  const audioPlayer = document.getElementById('audioPlayer');
+
+  let mediaRecorder = null;
+  let audioChunks = [];
+
+  const fmt = function (s) {
+    const m = Math.floor(s / 60);
+    const sec = String(s % 60).padStart(2, '0');
+    return m + ':' + sec;
+  };
+
+  let timerInterval = null;
+  let elapsed = 0;
+
+  function updateHeight() {
+    Streamlit.setFrameHeight(document.body.scrollHeight);
+  }
+
+  function startTimer() {
+    elapsed = 0;
+    timerInterval = setInterval(function () {
+      elapsed += 1;
+      recStatus.textContent = 'Recording — ' + fmt(elapsed);
+    }, 1000);
+  }
+
+  function stopTimer() {
+    if (timerInterval) {
+      clearInterval(timerInterval);
+      timerInterval = null;
+    }
+  }
+
+  startBtn.addEventListener('click', async function () {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      audioChunks = [];
+      mediaRecorder = new MediaRecorder(stream);
+
+      mediaRecorder.ondataavailable = function (event) {
+        if (event.data && event.data.size > 0) {
+          audioChunks.push(event.data);
+        }
+      };
+
+      mediaRecorder.onstop = function () {
+        stopTimer();
+        stream.getTracks().forEach((track) => track.stop());
+        const blob = new Blob(audioChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
+        const reader = new FileReader();
+
+        reader.onloadend = function () {
+          const b64 = reader.result.split(',')[1];
+          audioPlayer.src = reader.result;
+          audioPlayer.style.display = 'block';
+          finalStatus.textContent = '✅ Done! Playback is ready and audio is being sent to the app.';
+          Streamlit.setComponentValue({ audio_b64: b64, mime: mediaRecorder.mimeType || 'audio/webm' });
+          updateHeight();
+        };
+
+        reader.readAsDataURL(blob);
+      };
+
+      mediaRecorder.start();
+      startBtn.disabled = true;
+      startBtn.classList.add('disabled');
+      stopBtn.disabled = false;
+      stopBtn.classList.remove('disabled');
+      recStatus.textContent = 'Recording — 0:00';
+      finalStatus.textContent = '';
+      startTimer();
+      updateHeight();
+    } catch (err) {
+      recStatus.textContent = '⚠️ Microphone error: ' + (err.message || err.name);
+    }
+  });
+
+  stopBtn.addEventListener('click', function () {
+    if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+      mediaRecorder.stop();
+      startBtn.disabled = false;
+      startBtn.classList.remove('disabled');
+      stopBtn.disabled = true;
+      stopBtn.classList.add('disabled');
+    }
+  });
+})();
+</script>
+</body>
+</html>

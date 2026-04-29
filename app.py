@@ -1,17 +1,22 @@
-# app.py  —  Run with: streamlit run app.py
+from pydub import AudioSegment
+
+AudioSegment.converter = r"D:\ffmpeg-8.1-essentials_build\bin\ffmpeg.exe"
+AudioSegment.ffmpeg = r"D:\ffmpeg-8.1-essentials_build\bin\ffmpeg.exe"
+AudioSegment.ffprobe = r"D:\ffmpeg-8.1-essentials_build\bin\ffprobe.exe"
+
 
 import datetime
 import random
 import json
 import base64
 import html
-import numpy as np
-import av
 import os
 import logging
-import wave
 import io
-import threading
+import speech_recognition
+
+from pathlib import Path
+
 
 
 os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
@@ -20,9 +25,9 @@ os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
 
 import streamlit as st
+import streamlit.components.v1 as components
 from dateutil import parser as dateparser
 from deep_translator import GoogleTranslator
-from streamlit_webrtc import webrtc_streamer, AudioProcessorBase, WebRtcMode
 
 try:
     from utils.speech_to_text import transcribe_audio
@@ -40,6 +45,7 @@ from tools.ner_tool import extract_entities
 # ╚══════════════════════════════════════════════════════════════════╝
 
 DATA_FILE = "generated_firs.json"
+RECORDINGS_DIR = Path(__file__).parent / "recordings"
 
 LANGUAGES = {
     "English": "en", "Hindi": "hi", "Tamil": "ta", "Telugu": "te",
@@ -220,22 +226,6 @@ html, body, [class*="css"] {
     padding: 0.7rem 1.1rem; font-size: 0.83rem; color: #d4a849; margin-bottom: 0.9rem; line-height: 1.6;
 }
 
-.mic-ready {
-    background: rgba(74,222,128,0.08); border: 1px solid rgba(74,222,128,0.25);
-    border-radius: var(--radius-md); padding: 0.75rem 1.1rem;
-    font-size: 0.85rem; color: var(--green-soft); margin: 0.65rem 0;
-}
-.mic-recording {
-    background: rgba(248,113,113,0.08); border: 1px solid rgba(248,113,113,0.25);
-    border-radius: var(--radius-md); padding: 0.75rem 1.1rem;
-    font-size: 0.85rem; color: var(--red-soft); margin: 0.65rem 0;
-}
-.mic-captured {
-    background: rgba(56,189,248,0.08); border: 1px solid rgba(56,189,248,0.25);
-    border-radius: var(--radius-md); padding: 0.75rem 1.1rem;
-    font-size: 0.85rem; color: var(--cyan); margin: 0.65rem 0;
-}
-
 .section-divider {
     height: 1px; background: linear-gradient(to right, var(--teal-border), transparent 80%);
     border: none; margin: 1.8rem 0;
@@ -319,7 +309,7 @@ html, body, [class*="css"] {
 [data-testid="stSidebar"] {
     background: var(--bg-deep) !important; border-right: 1px solid var(--border-subtle) !important;
 }
-[data-testid="stSidebar"] * { color: var(--text-secondary) !important; }
+[data-testdata="stSidebar"] * { color: var(--text-secondary) !important; }
 [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3 {
     color: var(--teal) !important; font-family: var(--font-display) !important;
 }
@@ -334,6 +324,30 @@ audio { border-radius: var(--radius-md) !important; width: 100% !important; }
 
 
 # ╔══════════════════════════════════════════════════════════════════╗
+# ║                   AUDIO CONVERSION HELPER                       ║
+# ╚══════════════════════════════════════════════════════════════════╝
+
+def convert_audio_to_wav(audio_bytes: bytes, source_mime: str = "audio/webm") -> bytes:
+    try:
+        from pydub import AudioSegment
+        fmt_map = {
+            "audio/webm": "webm", "audio/ogg":  "ogg",  "audio/mp3":  "mp3",
+            "audio/mpeg": "mp3",  "audio/mp4":  "mp4",  "audio/m4a":  "mp4",
+            "audio/wav":  "wav",  "audio/x-wav":"wav",  "audio/flac": "flac",
+        }
+        fmt = fmt_map.get(source_mime.lower().split(";")[0].strip(), "webm")
+        segment = AudioSegment.from_file(io.BytesIO(audio_bytes), format=fmt)
+        segment = segment.set_channels(1).set_frame_rate(16000).set_sample_width(2)
+        wav_buf = io.BytesIO()
+        segment.export(wav_buf, format="wav")
+        return wav_buf.getvalue()
+    except ImportError:
+        return audio_bytes
+    except Exception:
+        return audio_bytes
+
+
+# ╔══════════════════════════════════════════════════════════════════╗
 # ║                     UI — HTML COMPONENTS                        ║
 # ╚══════════════════════════════════════════════════════════════════╝
 
@@ -341,7 +355,7 @@ def ui_hero():
     st.markdown("""
     <div class="hero">
       <div class="hero-inner">
-        <div class="hero-pill">🇮🇳 Official Document System</div>
+        <div class="hero-pill"></div>
         <h1>⚖️ AI <span>FIR</span> Generating System</h1>
       </div>
     </div>
@@ -503,7 +517,8 @@ def build_fir_report(fir_number, summary, narrative, ipc_block, evidence_block, 
     return f"""
 ╔══════════════════════════════════════════════════════════════════╗
 ║              FIRST INFORMATION REPORT (FIR)                    ║
-║                  Under Section 154 Cr.P.C                      ╚══════════════════════════════════════════════════════════════════╝
+║                  Under Section 154 Cr.P.C                      ║
+╚══════════════════════════════════════════════════════════════════╝
 
   FIR Number       : {fir_number}
   Date Filed       : {datetime.date.today().strftime('%d %B %Y')}
@@ -588,28 +603,6 @@ def apply_ner_fields(text: str):
             pass
 
 
-def apply_extracted_fields(fields: dict):
-    if not isinstance(fields, dict):
-        return
-    if fields.get("complainant"):
-        st.session_state.auto_name = fields["complainant"]
-    if fields.get("contact"):
-        st.session_state.auto_contact = fields["contact"]
-    if fields.get("location"):
-        st.session_state.auto_location = fields["location"]
-    if fields.get("date"):
-        try:
-            parsed = dateparser.parse(str(fields["date"]))
-            if parsed:
-                st.session_state.auto_date = parsed.date()
-        except Exception:
-            pass
-    if fields.get("incident_type"):
-        st.session_state.incident_type = fields["incident_type"]
-    if fields.get("description"):
-        st.session_state.description = fields["description"]
-
-
 # ╔══════════════════════════════════════════════════════════════════╗
 # ║                    LOGIC — SESSION STATE                        ║
 # ╚══════════════════════════════════════════════════════════════════╝
@@ -631,96 +624,204 @@ _defaults = {
     "evidence_text": "",
     "witnesses_text": "",
     "editable_transcript": "",
+    # Live mic state: idle | captured | transcribed
+    "mic_phase": "idle",
+    "captured_audio_bytes": None,
+    "captured_audio_mime": "audio/wav",
 }
 
 for key, value in _defaults.items():
     if key not in st.session_state:
         st.session_state[key] = value
-if "mic_state" not in st.session_state:
-    st.session_state.mic_state = "idle"
-
-if "captured_audio_bytes" not in st.session_state:
-    st.session_state.captured_audio_bytes = None
 
 
-class AudioProcessor(AudioProcessorBase):
-    def __init__(self):
-        self._lock = threading.Lock()
-        self._frames: list = []
-
-    def recv_queued(self, frames: list) -> list:
-        """Called with a batch of incoming audio frames.
-
-        This avoids dropped frames and improves continuous audio capture.
-        """
-        try:
-            arrays = []
-            for frame in frames:
-                arrays.append(frame.to_ndarray())
-            with self._lock:
-                self._frames.extend(arrays)
-        except Exception:
-            pass
-        return frames
-
-    def get_frames(self) -> list:
-        with self._lock:
-            return list(self._frames)
-
-    def clear(self):
-        with self._lock:
-            self._frames.clear()
+def ensure_recordings_dir() -> Path:
+    RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
+    return RECORDINGS_DIR
 
 
 # ╔══════════════════════════════════════════════════════════════════╗
-# ║                      WAV BUILDER  (FIXED)                       ║
-# ║   • Handles (channels, samples) AND (samples,) shaped arrays    ║
-# ║   • Correct float-range detection before int16 conversion       ║
+# ║               LIVE MICROPHONE — RENDER FUNCTION                 ║
+# ║  Clean single-widget approach using st.audio_input only        ║
 # ╚══════════════════════════════════════════════════════════════════╝
 
-def _build_wav_bytes(frames: list) -> bytes | None:
-    if not frames:
-        return None
-    try:
-        mono_parts = []
-        for f in frames:
-            arr = np.asarray(f, dtype=np.float32)
-            if arr.ndim == 0:
-                continue
-            elif arr.ndim == 1:
-                # Already mono (samples,)
-                mono_parts.append(arr)
-            elif arr.ndim == 2:
-                # Shape is (channels, samples) — average across channels
-                mono_parts.append(arr.mean(axis=0))
+def render_live_mic():
+    phase = st.session_state.mic_phase
+
+    # ══════════════════════════════════════════════════════════════
+    # PHASE 1 — idle: show only the st.audio_input widget
+    # ══════════════════════════════════════════════════════════════
+    if phase == "idle":
+        st.markdown(
+            '<p style="color:#8b9ab5;font-size:0.84rem;margin-bottom:12px;">'
+            '🎙️ Click the <strong>microphone icon</strong> below to start recording. '
+            'Click it again to stop. Your recording will appear automatically.</p>',
+            unsafe_allow_html=True,
+        )
+
+        try:
+            audio_value = st.audio_input(
+                "🎤 Record your complaint",
+                key="live_mic_widget",
+            )
+        except AttributeError:
+            st.warning(
+                "⚠️ Your Streamlit version does not support the built-in mic widget. "
+                "Please upgrade (`pip install --upgrade streamlit`) or use the "
+                "**Upload Audio File** option instead."
+            )
+            return
+
+        if audio_value is not None:
+            audio_bytes = audio_value.read()
+            if audio_bytes:
+                st.session_state.captured_audio_bytes = audio_bytes
+                st.session_state.captured_audio_mime = "audio/wav"
+                st.session_state.mic_phase = "captured"
+                st.rerun()
             else:
-                mono_parts.append(arr.flatten())
+                st.error("⚠️ Recorded audio appears empty. Please try again.")
 
-        if not mono_parts:
-            return None
+    # ══════════════════════════════════════════════════════════════
+    # PHASE 2 — captured: playback + Transcribe button
+    # ══════════════════════════════════════════════════════════════
+    elif phase == "captured":
+        audio_bytes = st.session_state.captured_audio_bytes
+        audio_mime  = st.session_state.captured_audio_mime or "audio/wav"
 
-        flat = np.concatenate(mono_parts)
+        st.markdown(
+            '<div style="background:rgba(0,229,195,0.12);border:1px solid rgba(0,229,195,0.35);'
+            'border-radius:10px;padding:12px 16px;color:#00e5c3;font-size:0.88rem;'
+            'font-weight:600;margin-bottom:14px;">'
+            '✅ Recording captured! Play it back, then click <strong>Transcribe Audio</strong>.</div>',
+            unsafe_allow_html=True,
+        )
 
-        # Detect whether values are normalised floats [-1, 1] or raw int16 range
-        abs_max = np.abs(flat).max() if flat.size > 0 else 0.0
-        if abs_max <= 1.0:
-            # Normalised float → scale to int16
-            flat_int16 = (np.clip(flat, -1.0, 1.0) * 32767).astype(np.int16)
+        st.markdown("**🎧 Playback your recording:**")
+        st.markdown(
+            '<div style="background:rgba(0,229,195,0.05);border:1px solid rgba(0,229,195,0.18);'
+            'border-radius:10px;padding:12px 14px;margin-bottom:16px;">',
+            unsafe_allow_html=True,
+        )
+        if audio_bytes:
+            st.audio(audio_bytes, format=audio_mime)
         else:
-            # Already in int16 range
-            flat_int16 = np.clip(flat, -32768, 32767).astype(np.int16)
+            st.warning("⚠️ Audio data missing. Please re-record.")
+        st.markdown("</div>", unsafe_allow_html=True)
 
-        buf = io.BytesIO()
-        with wave.open(buf, "wb") as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)
-            wf.setframerate(48_000)
-            wf.writeframes(flat_int16.tobytes())
-        return buf.getvalue()
+        col_transcribe, col_rerecord = st.columns([3, 1])
 
-    except Exception as e:
-        st.error(f"⚠️ Audio build error: {e}")
-        return None
+        with col_transcribe:
+            transcribe_clicked = st.button(
+                "📝 Transcribe Audio",
+                key="btn_transcribe",
+                use_container_width=True,
+            )
+
+        with col_rerecord:
+            rerecord_clicked = st.button(
+                "🔄 Re-record",
+                key="btn_rerecord_captured",
+                use_container_width=True,
+            )
+
+        if rerecord_clicked:
+            st.session_state.mic_phase = "idle"
+            st.session_state.captured_audio_bytes = None
+            st.session_state.captured_audio_mime  = "audio/wav"
+            st.session_state.raw_transcript        = ""
+            st.session_state.editable_transcript   = ""
+            st.rerun()
+
+        if transcribe_clicked:
+            if transcribe_audio is None:
+                st.error("⚠️ `transcribe_audio` not found. Check utils/speech_to_text.py.")
+            elif not audio_bytes:
+                st.error("⚠️ No audio data. Please re-record.")
+            else:
+                with st.spinner("🔄 Converting and transcribing… this may take a moment."):
+                    try:
+                        wav_bytes = convert_audio_to_wav(audio_bytes, audio_mime)
+                        raw = transcribe_audio(wav_bytes)
+                    except Exception as exc:
+                        raw = f"Transcription error: {exc}"
+
+                error_kw = ["error", "unavailable", "failed", "unclear"]
+                if any(kw in raw.lower() for kw in error_kw):
+                    st.error(f"⚠️ Transcription issue: {raw}")
+                else:
+                    english = translate_to_english(raw)
+                    st.session_state.raw_transcript      = english
+                    st.session_state.editable_transcript = english
+                    st.session_state.description         = english
+                    st.session_state.mic_phase           = "transcribed"
+                    st.rerun()
+
+    # ══════════════════════════════════════════════════════════════
+    # PHASE 3 — transcribed: editable text + Extract Details
+    # ══════════════════════════════════════════════════════════════
+    elif phase == "transcribed":
+        st.markdown(
+            '<div style="background:rgba(74,222,128,0.08);border:1px solid rgba(74,222,128,0.28);'
+            'border-radius:10px;padding:12px 16px;color:#4ade80;font-size:0.88rem;'
+            'font-weight:600;margin-bottom:14px;">'
+            '✅ Transcription complete! Review and edit, then click '
+            '<strong>Extract Details & Auto-fill Form</strong>.</div>',
+            unsafe_allow_html=True,
+        )
+
+        st.markdown(
+            '<p style="color:#00e5c3;font-size:0.85rem;font-weight:600;margin-bottom:6px;">'
+            '📜 Transcribed Text — edit before extracting:</p>',
+            unsafe_allow_html=True,
+        )
+        edited = st.text_area(
+            "Transcript:",
+            value=st.session_state.editable_transcript,
+            height=160,
+            key="transcript_edit_transcribed",
+            label_visibility="collapsed",
+            placeholder="Your transcribed complaint appears here. Edit if needed.",
+        )
+        if edited != st.session_state.editable_transcript:
+            st.session_state.editable_transcript = edited
+            st.session_state.description = edited
+
+        col_extract, col_new = st.columns([3, 1])
+
+        with col_extract:
+            extract_clicked = st.button(
+                "🔍 Extract Details & Auto-fill Form",
+                key="btn_extract_details",
+                use_container_width=True,
+            )
+
+        with col_new:
+            new_rec_clicked = st.button(
+                "🗑️ New Recording",
+                key="btn_new_recording",
+                use_container_width=True,
+            )
+
+        if new_rec_clicked:
+            for k in [
+                "mic_phase", "captured_audio_bytes", "captured_audio_mime",
+                "raw_transcript", "editable_transcript", "description",
+            ]:
+                st.session_state.pop(k, None)
+            st.rerun()
+
+        if extract_clicked:
+            text = st.session_state.editable_transcript.strip()
+            if not text:
+                st.warning("⚠️ Transcript is empty. Please add some text first.")
+            else:
+                with st.spinner("🔍 Extracting name, date, location…"):
+                    st.session_state.description   = text
+                    st.session_state.incident_type = classify_intent(text)
+                    apply_ner_fields(text)
+                st.success("✅ Form fields auto-filled! Scroll down to review Step 2.")
+                st.rerun()
 
 
 # ╔══════════════════════════════════════════════════════════════════╗
@@ -768,7 +869,7 @@ def build_html_export(report_text: str, photo_b64: str = "", photo_name: str = "
     <pre>{safe_report}</pre>
   </div>
   {photo_block}
-  <div class="footer">Computer-generated FIR · Requires officer verification &amp; stamp.</div>
+  <div class="footer">Computer-generated FIR · Requires officer verification & stamp.</div>
 </body>
 </html>"""
 
@@ -869,7 +970,6 @@ def build_pdf_export(report_text: str, photo_b64: str = "", photo_name: str = ""
 
 
 def render_download_buttons(report_text: str, fir_num: str, photo_b64: str, photo_name: str, key_prefix: str):
-    """Shared download UI: format picker + download button."""
     fmt = st.radio(
         "📥 Download format:",
         ["TXT", "HTML (with photo)", "PDF (with photo)"],
@@ -878,35 +978,26 @@ def render_download_buttons(report_text: str, fir_num: str, photo_b64: str, phot
     )
     if fmt == "TXT":
         if photo_b64:
-            st.caption("⚠️ TXT cannot include the evidence photo. Choose HTML or PDF to embed it.")
+            st.caption("⚠️ TXT cannot include the evidence photo. Choose HTML or PDF.")
         st.download_button(
-            "⬇️ Download TXT",
-            report_text,
-            file_name=f"{fir_num}.txt",
-            mime="text/plain",
-            width='stretch',
-            key=f"dl_{key_prefix}_txt",
+            "⬇️ Download TXT", report_text,
+            file_name=f"{fir_num}.txt", mime="text/plain",
+            use_container_width=True, key=f"dl_{key_prefix}_txt",
         )
     elif fmt == "HTML (with photo)":
         html_out = build_html_export(report_text, photo_b64, photo_name)
         st.download_button(
-            "⬇️ Download HTML",
-            html_out,
-            file_name=f"{fir_num}.html",
-            mime="text/html",
-            width='stretch',
-            key=f"dl_{key_prefix}_html",
+            "⬇️ Download HTML", html_out,
+            file_name=f"{fir_num}.html", mime="text/html",
+            use_container_width=True, key=f"dl_{key_prefix}_html",
         )
     elif fmt == "PDF (with photo)":
         pdf_out = build_pdf_export(report_text, photo_b64, photo_name)
         if pdf_out:
             st.download_button(
-                "⬇️ Download PDF",
-                pdf_out,
-                file_name=f"{fir_num}.pdf",
-                mime="application/pdf",
-                width='stretch',
-                key=f"dl_{key_prefix}_pdf",
+                "⬇️ Download PDF", pdf_out,
+                file_name=f"{fir_num}.pdf", mime="application/pdf",
+                use_container_width=True, key=f"dl_{key_prefix}_pdf",
             )
 
 
@@ -939,158 +1030,11 @@ if input_mode == "🎤 Voice Complaint":
         key="voice_option_radio",
     )
 
+    # ── LIVE MICROPHONE ────────────────────────────────────────────
     if voice_option == "🎙️ Live Microphone":
-        if transcribe_audio is None:
-            st.warning("⚠️ Run: `pip install SpeechRecognition pydub` to enable voice input.")
-        else:
-            mic_state = st.session_state.mic_state
+        render_live_mic()
 
-            # ── STATE 1: IDLE — Show START button only ───────────────────
-            if mic_state == "idle":
-                st.markdown(
-                    '<div class="mic-ready">🎙️ Ready to record your complaint.</div>',
-                    unsafe_allow_html=True,
-                )
-                if st.button("🎙️ START RECORDING", key="start_recording", width='stretch'):
-                    st.session_state.mic_state = "recording"
-                    st.rerun()
-
-            # ── STATE 2: RECORDING — Show STOP button only ─────────────
-            elif mic_state == "recording":
-                ctx = webrtc_streamer(
-                    key="live_audio_recording",
-                    mode=WebRtcMode.SENDONLY,
-                    audio_processor_factory=AudioProcessor,
-                    media_stream_constraints={"video": False, "audio": True},
-                    async_processing=True,
-                    # ✅ FIX: auto-start recording (removes second START)
-                    desired_playing_state=True,
-                    # ✅ OPTIONAL: cleaner UI (removes device selection issues)
-                    rtc_configuration={"iceServers": []},
-                )
-
-                st.markdown(
-                    '<div class="mic-recording"><strong>● LIVE RECORDING…</strong> Speak clearly, then click STOP below.</div>',
-                    unsafe_allow_html=True,
-                )
-
-                if st.button("⏹️ STOP RECORDING", key="stop_recording", width='stretch'):
-                    frames = []
-                    if ctx and getattr(ctx, "audio_processor", None):
-                        frames = ctx.audio_processor.get_frames()
-
-                    if frames:
-                        wav_bytes = _build_wav_bytes(frames)
-                        if wav_bytes:
-                            st.session_state.captured_audio_bytes = wav_bytes
-                            st.session_state.mic_state = "captured"
-                            st.success("✅ Audio captured successfully!")
-                            st.rerun()
-                        else:
-                            st.error("⚠️ Could not process audio frames.")
-                            st.session_state.mic_state = "idle"
-                            st.rerun()
-                    else:
-                        st.warning("⚠️ No audio detected. Please speak louder.")
-
-            # ── STATE 3: CAPTURED — Show PLAYBACK + OPTIONS ──────────────
-            elif mic_state == "captured" and st.session_state.captured_audio_bytes:
-                st.markdown(
-                    '<div class="mic-captured">✅ Recording complete! 🎧 Listen & review below:</div>',
-                    unsafe_allow_html=True,
-                )
-
-                st.audio(st.session_state.captured_audio_bytes, format="audio/wav")
-
-                col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
-                with col1:
-                    if st.button("🔄 RE-RECORD", key="re_record_btn", width='stretch'):
-                        st.session_state.mic_state = "idle"
-                        st.session_state.captured_audio_bytes = None
-                        st.session_state.raw_transcript = ""
-                        st.session_state.editable_transcript = ""
-                        st.rerun()
-
-                with col2:
-                    if st.button("📝 CONVERT TO TEXT", key="convert_audio_btn", width='stretch'):
-                        with st.spinner("🔄 Transcribing your recording…"):
-                            try:
-                                raw_transcript = transcribe_audio(st.session_state.captured_audio_bytes)
-                            except Exception as exc:
-                                raw_transcript = f"Transcription error: {exc}"
-
-                        error_keywords = ["error", "unavailable", "failed", "unclear", "could not"]
-                        if any(keyword in raw_transcript.lower() for keyword in error_keywords):
-                            st.error(f"⚠️ Transcription issue: {raw_transcript}")
-                            st.markdown('<div class="mic-captured">Try speaking more clearly or re-record.</div>', unsafe_allow_html=True)
-                        else:
-                            english_transcript = translate_to_english(raw_transcript)
-                            st.session_state.raw_transcript = english_transcript
-                            st.session_state.editable_transcript = english_transcript
-                            st.session_state.description = english_transcript
-                            st.success("✅ Text extracted! Review the transcript below and click Auto-Fill Form.")
-
-                            st.markdown("**📜 Transcribed Text:**")
-                            st.text_area(
-                                "Review and edit your transcript:",
-                                value=st.session_state.editable_transcript,
-                                height=100,
-                                key="captured_transcript",
-                            )
-
-                with col3:
-                    if st.button("🔍 AUTO-FILL FORM", key="auto_fill_btn", width='stretch'):
-                        transcript_to_use = st.session_state.get("editable_transcript", st.session_state.get("raw_transcript", ""))
-                        if not transcript_to_use.strip():
-                            st.warning("⚠️ Please convert to text first.")
-                        else:
-                            with st.spinner("🔍 Analyzing text for names, dates, locations…"):
-                                st.session_state.incident_type = classify_intent(transcript_to_use)
-                                apply_ner_fields(transcript_to_use)
-                            st.session_state.mic_state = "transcribed"
-                            st.success("✅ Form fields auto-filled!")
-                            st.rerun()
-
-                with col4:
-                    if st.button("❌ DISCARD", key="discard_audio_btn", width='stretch'):
-                        st.session_state.mic_state = "idle"
-                        st.session_state.captured_audio_bytes = None
-                        st.rerun()
-
-            # ── STATE 4: TRANSCRIBED — Show editable transcript ─────────
-            elif mic_state == "transcribed":
-                st.markdown("**📜 Generated Transcript (edit if needed):**")
-                edited_transcript = st.text_area(
-                    "✏️ Review & edit your complaint before proceeding:",
-                    value=st.session_state.editable_transcript,
-                    height=140,
-                    key="post_transcript_editor",
-                    placeholder="Your spoken complaint has been transcribed. Edit if needed, then click Extract Details.",
-                )
-
-                st.session_state.editable_transcript = edited_transcript
-                st.session_state.description = edited_transcript
-
-                col_extract, col_clear = st.columns([3, 1])
-                with col_extract:
-                    if st.button("🔍 EXTRACT DETAILS & AUTO-FILL FORM", key="extract_post_transcript", width='stretch'):
-                        if not edited_transcript.strip():
-                            st.warning("⚠️ Transcript is empty. Please record again.")
-                        else:
-                            with st.spinner("🔍 Analyzing text for names, dates, locations…"):
-                                st.session_state.incident_type = classify_intent(edited_transcript)
-                                apply_ner_fields(edited_transcript)
-                                st.session_state.description = edited_transcript
-                            st.success("✅ Form fields auto-filled with extracted details!")
-                            st.rerun()
-
-                with col_clear:
-                    if st.button("🗑️ NEW RECORDING", key="new_recording_btn", width='stretch'):
-                        for key in ["mic_state", "captured_audio_bytes", "raw_transcript", "editable_transcript", "description"]:
-                            if key in st.session_state:
-                                del st.session_state[key]
-                        st.rerun()
-
+    # ── UPLOAD AUDIO FILE ──────────────────────────────────────────
     else:
         if transcribe_audio is None:
             st.warning("⚠️ Run: pip install SpeechRecognition pydub")
@@ -1098,7 +1042,7 @@ if input_mode == "🎤 Voice Complaint":
             ui_tip("Upload WAV, MP3, FLAC, OGG or M4A. Details will be auto-filled below.")
             audio_file = st.file_uploader(
                 "Upload Audio File",
-                type=["wav", "mp3", "flac", "ogg", "m4a"],
+                type=["wav", "mp3", "flac", "ogg", "m4a", "webm"],
             )
             if audio_file is not None:
                 try:
@@ -1109,11 +1053,21 @@ if input_mode == "🎤 Voice Complaint":
                 if st.button("📝 Transcribe & Auto-fill Form"):
                     audio_bytes = audio_file.read()
                     if not audio_bytes:
-                        st.error("⚠️ Uploaded file appears empty. Please try another file.")
+                        st.error("⚠️ Uploaded file appears empty.")
                     else:
-                        with st.spinner("Transcribing audio…"):
+                        with st.spinner("Converting and transcribing audio…"):
                             try:
-                                transcript = transcribe_audio(audio_bytes)
+                                ext_mime_map = {
+                                    "wav": "audio/wav", "mp3": "audio/mp3",
+                                    "flac": "audio/flac", "ogg": "audio/ogg",
+                                    "m4a": "audio/mp4", "webm": "audio/webm",
+                                }
+                                src_mime = ext_mime_map.get(
+                                    audio_file.name.rsplit(".", 1)[-1].lower(),
+                                    audio_file.type or "audio/webm"
+                                )
+                                wav_bytes  = convert_audio_to_wav(audio_bytes, src_mime)
+                                transcript = transcribe_audio(wav_bytes)
                             except Exception as exc:
                                 transcript = f"Transcription error: {exc}"
                         _error_words = ["error", "unavailable", "failed", "unclear"]
@@ -1128,38 +1082,36 @@ if input_mode == "🎤 Voice Complaint":
                             apply_ner_fields(english)
                             st.rerun()
 
-
-# ── TRANSCRIPT DISPLAY + EDITABLE TEXT AREA ───────────────────────
-if st.session_state.get("raw_transcript", ""):
-    st.markdown("**📜 Transcript (edit if needed):**")
-    edited = st.text_area(
-        "✏️ Edit your transcript before extracting details:",
-        value=st.session_state.get("editable_transcript", st.session_state.raw_transcript),
-        height=120,
-        key="editable_transcript_area",
-        placeholder="The transcript will appear here. You can edit it before extracting details.",
-    )
-    st.session_state.editable_transcript = edited
-    st.session_state.description = edited
-    col_ext, col_clr = st.columns([3, 1])
-    with col_ext:
-        if st.button("🔍 Extract Details & Auto-fill Form", key="extract_btn", width='stretch'):
-            if not edited or not edited.strip():
-                st.warning("⚠️ Transcript is empty. Please re-record or upload audio.")
-            else:
-                with st.spinner("Extracting name, date, location…"):
-                    st.session_state.description   = edited
-                    st.session_state.incident_type = classify_intent(edited)
-                    apply_ner_fields(edited)
-                st.success("✅ Details extracted and filled below!")
+# ── TRANSCRIPT DISPLAY (upload flow) ──────────────────────────────
+if input_mode == "🎤 Voice Complaint" and st.session_state.get("raw_transcript"):
+    if st.session_state.get("voice_option_radio") == "📁 Upload Audio File":
+        st.markdown("**📜 Transcript (edit if needed):**")
+        edited = st.text_area(
+            "✏️ Edit before extracting details:",
+            value=st.session_state.get("editable_transcript", st.session_state.raw_transcript),
+            height=120,
+            key="editable_transcript_area",
+        )
+        st.session_state.editable_transcript = edited
+        st.session_state.description = edited
+        col_ext, col_clr = st.columns([3, 1])
+        with col_ext:
+            if st.button("🔍 Extract Details & Auto-fill Form", key="extract_btn", use_container_width=True):
+                if not edited.strip():
+                    st.warning("⚠️ Transcript is empty.")
+                else:
+                    with st.spinner("Extracting…"):
+                        st.session_state.description   = edited
+                        st.session_state.incident_type = classify_intent(edited)
+                        apply_ner_fields(edited)
+                    st.success("✅ Details extracted!")
+                    st.rerun()
+        with col_clr:
+            if st.button("🗑️ Clear", key="clear_transcript_btn", use_container_width=True):
+                st.session_state.raw_transcript      = ""
+                st.session_state.editable_transcript = ""
+                st.session_state.description         = ""
                 st.rerun()
-    with col_clr:
-        if st.button("🗑️ Clear", key="clear_transcript_btn", width='stretch'):
-            st.session_state.raw_transcript      = ""
-            st.session_state.editable_transcript = ""
-            st.session_state.description         = ""
-            st.rerun()
-
 
 # ── TYPE COMPLAINT FLOW ────────────────────────────────────────────
 if input_mode == "✍️ Type Complaint":
@@ -1175,8 +1127,8 @@ if input_mode == "✍️ Type Complaint":
         english = translate_to_english(user_text)
         st.session_state.description   = english
         st.session_state.incident_type = classify_intent(english)
-        if st.button("🔍 Extract Details from Text", width='stretch'):
-            with st.spinner("Extracting name, date, location, contact…"):
+        if st.button("🔍 Extract Details from Text", use_container_width=True):
+            with st.spinner("Extracting…"):
                 apply_ner_fields(english)
                 st.session_state.description = english
             st.success("✅ Details extracted!")
@@ -1184,6 +1136,9 @@ if input_mode == "✍️ Type Complaint":
 
 ui_card_close()
 
+st.markdown("")
+st.divider()
+st.markdown("")
 
 # ╔══════════════════════════════════════════════════════════════════╗
 # ║             RENDER — STEP 2: COMPLAINANT DETAILS                ║
@@ -1194,11 +1149,14 @@ ui_card_open("Complainant Details", "2")
 col1, col2 = st.columns(2)
 with col1:
     complainant = st.text_input("👤 Complainant Name *", key="auto_name")
+    st.markdown("")
     location    = st.text_input("📍 Incident Location *", key="auto_location")
 with col2:
     contact = st.text_input("📞 Contact Number", key="auto_contact")
+    st.markdown("")
     date    = st.date_input("📅 Incident Date *", key="auto_date")
 
+st.markdown("")
 auto_incident = st.session_state.get("incident_type", "Other")
 default_index = next(
     (i for i, o in enumerate(INCIDENT_OPTIONS)
@@ -1209,6 +1167,10 @@ incident_type = st.selectbox("⚖️ Incident Type", INCIDENT_OPTIONS, index=def
 
 ui_card_close()
 
+st.markdown("")
+st.divider()
+st.markdown("")
+
 
 # ╔══════════════════════════════════════════════════════════════════╗
 # ║               RENDER — STEP 3: EVIDENCE (optional)              ║
@@ -1216,8 +1178,7 @@ ui_card_close()
 
 with st.expander("➕ Evidence & Witnesses (optional)"):
     evidence_input = st.text_area(
-        "🧾 Evidence Details",
-        height=80,
+        "🧾 Evidence Details", height=80,
         value=st.session_state.evidence_text,
         placeholder="CCTV footage, bank statement, photos…",
         key="evidence_input",
@@ -1225,8 +1186,7 @@ with st.expander("➕ Evidence & Witnesses (optional)"):
     st.session_state.evidence_text = evidence_input
 
     witnesses_input = st.text_area(
-        "👥 Witnesses",
-        height=80,
+        "👥 Witnesses", height=80,
         value=st.session_state.witnesses_text,
         placeholder="Names and contact details of witnesses",
         key="witnesses_input",
@@ -1245,7 +1205,7 @@ with st.expander("➕ Evidence & Witnesses (optional)"):
             if photo_bytes:
                 st.session_state.photo_name = photo_file.name
                 st.session_state.photo_b64  = base64.b64encode(photo_bytes).decode("utf-8")
-                st.image(photo_bytes, caption=photo_file.name, width='stretch')
+                st.image(photo_bytes, caption=photo_file.name, use_container_width=True)
                 st.success(f"✅ Photo saved: {photo_file.name}")
             else:
                 st.warning("⚠️ Uploaded photo appears empty.")
@@ -1254,24 +1214,26 @@ with st.expander("➕ Evidence & Witnesses (optional)"):
     elif st.session_state.photo_b64:
         try:
             img_bytes = base64.b64decode(st.session_state.photo_b64)
-            st.image(img_bytes, caption=st.session_state.photo_name, width='stretch')
+            st.image(img_bytes, caption=st.session_state.photo_name, use_container_width=True)
         except Exception:
             st.session_state.photo_b64 = ""
 
+st.markdown("")
 ui_divider()
+st.markdown("")
 
 
 # ╔══════════════════════════════════════════════════════════════════╗
 # ║                  LOGIC — GENERATE FIR                           ║
 # ╚══════════════════════════════════════════════════════════════════╝
 
-if st.button("🚀 Generate FIR", width='stretch'):
+if st.button("🚀 Generate FIR", use_container_width=True):
 
     if not st.session_state.auto_name or not st.session_state.auto_name.strip():
         st.error("⚠️ Complainant name is required.")
         st.stop()
     if not st.session_state.description or not st.session_state.description.strip():
-        st.error("⚠️ Incident description is required. Please describe what happened.")
+        st.error("⚠️ Incident description is required.")
         st.stop()
 
     with st.spinner("Generating FIR…"):
@@ -1286,21 +1248,15 @@ if st.button("🚀 Generate FIR", width='stretch'):
 
         clean_desc = st.session_state.description.strip().strip('"').strip("'")
         try:
-            narrative = ai_legal_rewrite(
-                clean_desc,
-                complainant=st.session_state.auto_name,
-            )
+            narrative = ai_legal_rewrite(clean_desc, complainant=st.session_state.auto_name)
         except Exception as exc:
             narrative = f"Narrative generation failed: {exc}\n\n{clean_desc}"
 
-        evidence  = st.session_state.evidence_text or ""
-        witnesses = st.session_state.witnesses_text or ""
-
         evidence_lines = []
-        if evidence.strip():
-            evidence_lines.append(f"  Evidence   : {evidence.strip()}")
-        if witnesses.strip():
-            evidence_lines.append(f"  Witnesses  : {witnesses.strip()}")
+        if st.session_state.evidence_text.strip():
+            evidence_lines.append(f"  Evidence   : {st.session_state.evidence_text.strip()}")
+        if st.session_state.witnesses_text.strip():
+            evidence_lines.append(f"  Witnesses  : {st.session_state.witnesses_text.strip()}")
         if st.session_state.photo_name:
             evidence_lines.append(f"  Photo      : {st.session_state.photo_name} (attached)")
         evidence_block = "\n".join(evidence_lines) if evidence_lines else "  None provided."
@@ -1364,7 +1320,7 @@ if st.session_state.get("fir_output"):
             st.image(
                 base64.b64decode(st.session_state.photo_b64),
                 caption=st.session_state.photo_name,
-                width='stretch',
+                use_container_width=True,
             )
         except Exception:
             st.warning("⚠️ Could not display attached photo.")
@@ -1379,7 +1335,7 @@ if st.session_state.get("fir_output"):
             key_prefix="main",
         )
     with col_save:
-        if st.button("💾 Save to Local Store", width='stretch'):
+        if st.button("💾 Save to Local Store", use_container_width=True):
             if st.session_state.get("fir_record"):
                 save_fir_record(st.session_state.fir_record)
                 st.success(f"✅ Saved to {DATA_FILE}")
@@ -1400,7 +1356,7 @@ with st.expander("📂 View Saved FIR Records"):
                 data = []
         except (json.JSONDecodeError, ValueError):
             data = []
-            st.warning("⚠️ Records file appears corrupted. It will be reset on next save.")
+            st.warning("⚠️ Records file appears corrupted.")
         except OSError as e:
             data = []
             st.warning(f"⚠️ Could not read records file: {e}")
@@ -1410,9 +1366,9 @@ with st.expander("📂 View Saved FIR Records"):
         else:
             for i, record in enumerate(reversed(data)):
                 with st.expander(
-                    f"🧾 {record.get('fir_number', '?')} — "
-                    f"{record.get('complainant', '')} — "
-                    f"{record.get('incident_date', '')}"
+                    f"🧾 {record.get('fir_number','?')} — "
+                    f"{record.get('complainant','')} — "
+                    f"{record.get('incident_date','')}"
                 ):
                     report_text = record.get("report", "")
                     if report_text:
@@ -1428,13 +1384,12 @@ with st.expander("📂 View Saved FIR Records"):
                             st.image(
                                 base64.b64decode(rec_pb64),
                                 caption=rec_pname or "Evidence",
-                                width='stretch',
+                                use_container_width=True,
                             )
                         except Exception:
                             st.warning("⚠️ Could not display saved evidence photo.")
 
                     fir_num = record.get("fir_number", f"FIR-{i}")
-
                     c1, c2, c3 = st.columns(3)
                     with c1:
                         if report_text:
@@ -1446,7 +1401,7 @@ with st.expander("📂 View Saved FIR Records"):
                                 key_prefix=f"saved_{i}",
                             )
                     with c2:
-                        if st.button("🗑 Delete", key=f"del_{i}", width='stretch'):
+                        if st.button("🗑 Delete", key=f"del_{i}", use_container_width=True):
                             target_num = record.get("fir_number")
                             data = [r for r in data if r.get("fir_number") != target_num]
                             try:
@@ -1454,7 +1409,7 @@ with st.expander("📂 View Saved FIR Records"):
                                     json.dump(data, f, indent=2, ensure_ascii=False)
                                 st.success("Deleted ✅")
                             except OSError as e:
-                                st.error(f"⚠️ Could not delete record: {e}")
+                                st.error(f"⚠️ Could not delete: {e}")
                             st.rerun()
                     with c3:
                         st.caption(f"Record #{len(data) - i}")
