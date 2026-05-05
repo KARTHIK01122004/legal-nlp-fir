@@ -1,2 +1,0 @@
-class IPCSectionAgent:
-    pass

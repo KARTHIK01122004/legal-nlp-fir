@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 from pydub import AudioSegment
 
 AudioSegment.converter = r"D:\ffmpeg-8.1-essentials_build\bin\ffmpeg.exe"
@@ -13,11 +14,13 @@ import html
 import os
 import logging
 import io
+import re
 import speech_recognition
 
 from pathlib import Path
 
-
+# ── Logger ────────────────────────────────────────────────────────────
+logger = logging.getLogger(__name__)
 
 os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
@@ -220,6 +223,21 @@ html, body, [class*="css"] {
     white-space: pre-wrap; word-break: break-word;
 }
 
+.lang-badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: rgba(56,189,248,0.10); border: 1px solid rgba(56,189,248,0.30);
+    border-radius: 20px; padding: 0.22rem 0.9rem;
+    font-size: 0.75rem; font-weight: 600; color: #38bdf8;
+    letter-spacing: 0.4px; margin-bottom: 10px;
+}
+
+.translation-notice {
+    background: rgba(0,229,195,0.07); border: 1px solid rgba(0,229,195,0.22);
+    border-left: 3px solid var(--teal); border-radius: 0 var(--radius-md) var(--radius-md) 0;
+    padding: 0.65rem 1.1rem; font-size: 0.82rem; color: var(--teal-dim);
+    margin-bottom: 0.85rem; line-height: 1.5;
+}
+
 .tip {
     background: rgba(245,158,11,0.08); border: 1px solid rgba(245,158,11,0.2);
     border-left: 3px solid var(--amber); border-radius: 0 var(--radius-md) var(--radius-md) 0;
@@ -328,6 +346,11 @@ audio { border-radius: var(--radius-md) !important; width: 100% !important; }
 # ╚══════════════════════════════════════════════════════════════════╝
 
 def convert_audio_to_wav(audio_bytes: bytes, source_mime: str = "audio/webm") -> bytes:
+    """
+    Pre-convert browser audio to WAV before passing to transcribe_audio().
+    Tries the declared MIME type first, then falls back through webm and wav.
+    Returns the original bytes only as a last resort.
+    """
     try:
         from pydub import AudioSegment
         fmt_map = {
@@ -335,16 +358,63 @@ def convert_audio_to_wav(audio_bytes: bytes, source_mime: str = "audio/webm") ->
             "audio/mpeg": "mp3",  "audio/mp4":  "mp4",  "audio/m4a":  "mp4",
             "audio/wav":  "wav",  "audio/x-wav":"wav",  "audio/flac": "flac",
         }
-        fmt = fmt_map.get(source_mime.lower().split(";")[0].strip(), "webm")
-        segment = AudioSegment.from_file(io.BytesIO(audio_bytes), format=fmt)
-        segment = segment.set_channels(1).set_frame_rate(16000).set_sample_width(2)
-        wav_buf = io.BytesIO()
-        segment.export(wav_buf, format="wav")
-        return wav_buf.getvalue()
+        declared_fmt = fmt_map.get(source_mime.lower().split(";")[0].strip(), "webm")
+
+        for fmt in dict.fromkeys([declared_fmt, "webm", "wav"]):
+            try:
+                segment = AudioSegment.from_file(io.BytesIO(audio_bytes), format=fmt)
+                segment = segment.set_channels(1).set_frame_rate(16000).set_sample_width(2)
+                wav_buf = io.BytesIO()
+                segment.export(wav_buf, format="wav")
+                logger.debug("convert_audio_to_wav: decoded as '%s'", fmt)
+                return wav_buf.getvalue()
+            except Exception:
+                continue
+
+        logger.warning("convert_audio_to_wav: all formats failed, returning raw bytes")
+        return audio_bytes
+
     except ImportError:
+        logger.warning("convert_audio_to_wav: pydub not available, returning raw bytes")
         return audio_bytes
+
+
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║              LANGUAGE DETECTION HELPER                          ║
+# ╚══════════════════════════════════════════════════════════════════╝
+
+def detect_language(text: str) -> str:
+    """
+    Detect the language of input text using GoogleTranslator.
+    Returns a language code string like 'hi', 'ta', 'en', etc.
+    Falls back to 'en' on failure.
+    """
+    if not text or not text.strip():
+        return "en"
+    try:
+        from deep_translator import GoogleTranslator
+        translator = GoogleTranslator(source="auto", target="en")
+        detected = translator.detect(text[:200])
+        if detected:
+            return detected
     except Exception:
-        return audio_bytes
+        pass
+    # Heuristic fallback using Unicode ranges
+    for ch in text:
+        cp = ord(ch)
+        if 0x0900 <= cp <= 0x097F: return "hi"
+        if 0x0B80 <= cp <= 0x0BFF: return "ta"
+        if 0x0C00 <= cp <= 0x0C7F: return "te"
+        if 0x0C80 <= cp <= 0x0CFF: return "kn"
+        if 0x0D00 <= cp <= 0x0D7F: return "ml"
+        if 0x0980 <= cp <= 0x09FF: return "bn"
+        if 0x0A80 <= cp <= 0x0AFF: return "gu"
+        if 0x0A00 <= cp <= 0x0A7F: return "pa"
+        if 0x0B00 <= cp <= 0x0B7F: return "or"
+    return "en"
+
+
+LANG_NAMES = {v: k for k, v in LANGUAGES.items()}
 
 
 # ╔══════════════════════════════════════════════════════════════════╗
@@ -356,7 +426,7 @@ def ui_hero():
     <div class="hero">
       <div class="hero-inner">
         <div class="hero-pill"></div>
-        <h1>⚖️ AI <span>FIR</span> Generating System</h1>
+        <h1>⚖️ AI <span>FIR</span> Generator</h1>
       </div>
     </div>
     """, unsafe_allow_html=True)
@@ -386,6 +456,29 @@ def ui_transcript(text: str):
 
 def ui_tip(text: str):
     st.markdown(f'<div class="tip">{text}</div>', unsafe_allow_html=True)
+
+
+def ui_lang_badge(lang_code: str):
+    lang_name = LANG_NAMES.get(lang_code, lang_code.upper())
+    st.markdown(
+        f'<div class="lang-badge">🌐 Detected Language: {html.escape(lang_name)}</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def ui_translation_notice(original_lang: str, translated_snippet: str = ""):
+    lang_name = LANG_NAMES.get(original_lang, original_lang.upper())
+    snippet_html = (
+        f' &nbsp;&middot;&nbsp; <em>Preview: &quot;{html.escape(translated_snippet[:80])}...&quot;</em>'
+        if translated_snippet else ""
+    )
+    st.markdown(
+        f'<div class="translation-notice">'
+        f'🔄 Your <strong>{html.escape(lang_name)}</strong> description was auto-translated to English '
+        f'for processing (NER, IPC matching, narrative generation).{snippet_html}'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
 
 
 def ui_ipc_badges(matches: list):
@@ -418,10 +511,9 @@ def ui_divider():
 def ui_sidebar():
     st.sidebar.markdown('<h2 style="margin-top:0">⚙️ Settings</h2>', unsafe_allow_html=True)
     lang = st.sidebar.selectbox("Output Language", list(LANGUAGES.keys()))
-    st.sidebar.markdown("---")
     st.sidebar.markdown("### 📝 How to use")
     st.sidebar.markdown("""
-1. Describe the incident (voice or text)
+1. Describe the incident in **your language**
 2. Click **Extract Details** — fields auto-fill
 3. Review Step 2 fields and edit if needed
 4. Add evidence / witnesses (optional)
@@ -429,7 +521,7 @@ def ui_sidebar():
     """)
     st.sidebar.markdown("---")
     st.sidebar.markdown(
-        '<p style="font-size:0.73rem;color:#4d5e78;">AI Generated FIR</p>',
+        '<p style="font-size:0.73rem;color:#4d5e78;">AI Generated FIR · Multilingual Support</p>',
         unsafe_allow_html=True,
     )
     return lang, LANGUAGES[lang]
@@ -458,6 +550,7 @@ def save_fir_record(record: dict, path: str = DATA_FILE):
 
 
 def translate_to_english(text: str) -> str:
+    """Translate any language text to English."""
     if not text or not text.strip():
         return text
     try:
@@ -467,12 +560,19 @@ def translate_to_english(text: str) -> str:
 
 
 def translate_output(text: str, target_lang: str) -> str:
+    """Translate FIR output from English to the selected output language."""
     if target_lang == "en":
         return text
     if not text or not text.strip():
         return text
     try:
-        return GoogleTranslator(source="en", target=target_lang).translate(text)
+        chunk_size = 4500
+        chunks = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
+        translated_chunks = []
+        translator = GoogleTranslator(source="en", target=target_lang)
+        for chunk in chunks:
+            translated_chunks.append(translator.translate(chunk))
+        return "".join(translated_chunks)
     except Exception:
         return text
 
@@ -482,6 +582,7 @@ def generate_fir_number() -> str:
 
 
 def classify_intent(text: str) -> str:
+    """Classify incident type. Expects English text."""
     if not text:
         return "Other"
     t = text.lower()
@@ -521,17 +622,19 @@ def build_fir_report(fir_number, summary, narrative, ipc_block, evidence_block, 
 ╚══════════════════════════════════════════════════════════════════╝
 
   FIR Number       : {fir_number}
-  Date Filed       : {datetime.date.today().strftime('%d %B %Y')}
+  Date Filed       : {ss.auto_register_date.strftime('%d %B %Y')}
   Time Recorded    : {datetime.datetime.now().strftime('%I:%M %p')}
-  Police Station   : {ss.auto_location or 'Not specified'}
+  
 
 ══════════════════════════════════════════════════════════════════
   SECTION 1 — COMPLAINANT DETAILS
 ══════════════════════════════════════════════════════════════════
 
   Name             : {ss.auto_name}
+  Address          : {ss.auto_address or 'Not specified'}
   Contact          : {ss.auto_contact or 'Not provided'}
   Incident Date    : {str(ss.auto_date)}
+  Complaint Regd. Date: {ss.auto_register_date.strftime('%d %B %Y')}
   Incident Location: {ss.auto_location or 'Not specified'}
   Incident Type    : {incident_type}
 
@@ -580,27 +683,278 @@ def build_fir_report(fir_number, summary, narrative, ipc_block, evidence_block, 
 # ║                   LOGIC — STATE MUTATIONS                       ║
 # ╚══════════════════════════════════════════════════════════════════╝
 
+def extract_date_from_text(text: str):
+    """
+    Robustly extract an incident date from free-form text using regex + dateutil.
+
+    FIX: Added year-optional patterns so "20th March" (without a year) is
+    correctly parsed. The resolved date is assumed to be in the current year;
+    if that would put it more than 30 days in the future it is rolled back
+    one year (handles "March 20" said in February, for instance).
+    """
+    _MONTHS = (
+        r'Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|'
+        r'Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?'
+    )
+
+    # 1. ISO: 2026-03-20
+    m = re.search(r'\b(\d{4})-(\d{2})-(\d{2})\b', text)
+    if m:
+        try:
+            return datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            pass
+
+    # 2. DD/MM/YYYY or DD-MM-YYYY
+    m = re.search(r'\b(\d{1,2})[/-](\d{1,2})[/-](\d{4})\b', text)
+    if m:
+        try:
+            parsed = dateparser.parse(m.group(), dayfirst=True)
+            if parsed:
+                return parsed.date()
+        except Exception:
+            pass
+
+    # 3. "20th March 2026" / "March 20, 2026"  (with explicit year)
+    pattern_with_year = (
+        r'\b(?:\d{1,2}(?:st|nd|rd|th)?\s+(?:' + _MONTHS + r')\s+\d{4}|'
+        r'(?:' + _MONTHS + r')\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4})\b'
+    )
+    m = re.search(pattern_with_year, text, re.IGNORECASE)
+    if m:
+        try:
+            parsed = dateparser.parse(m.group(), dayfirst=True)
+            if parsed:
+                return parsed.date()
+        except Exception:
+            pass
+
+    # 4. ── NEW: "20th March" / "March 20" (NO year) ─────────────────
+    #    Append current year, then adjust back one year if the result
+    #    would be implausibly far in the future.
+    pattern_no_year = (
+        r'\b(?:\d{1,2}(?:st|nd|rd|th)?\s+(?:' + _MONTHS + r')|'
+        r'(?:' + _MONTHS + r')\s+\d{1,2}(?:st|nd|rd|th)?)\b'
+    )
+    m = re.search(pattern_no_year, text, re.IGNORECASE)
+    if m:
+        try:
+            date_str = m.group().strip() + f" {datetime.date.today().year}"
+            parsed = dateparser.parse(date_str, dayfirst=True)
+            if parsed:
+                result = parsed.date()
+                # If it resolved to more than 30 days in the future,
+                # the speaker almost certainly meant last year.
+                if (result - datetime.date.today()).days > 30:
+                    result = result.replace(year=result.year - 1)
+                return result
+        except Exception:
+            pass
+
+    return None
+
+
+def normalize_transcribed_text(text: str) -> str:
+    """Clean up raw transcript spacing and punctuation for better parsing."""
+    if not text or not text.strip():
+        return text
+    text = re.sub(r"\s+", " ", text.strip())
+    text = re.sub(r"\s+([,.!?;:])", r"\1", text)
+    return text
+
+
+def clean_location_candidate(location: str) -> str:
+    """Trim trailing date/time phrases and leading time markers from an extracted address string."""
+    if not location or not location.strip():
+        return location.strip()
+    cleaned = location.strip()
+    cleaned = re.sub(
+        r'^(?:at\s+)?(?:\d{1,2}(?::\d{2})?\s*(?:am|pm)|\d{1,2}(?::\d{2})?)\s+',
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r'\b(?:on|at)\b\s+(?:\d{1,2}(?:st|nd|rd|th)?|'
+        r'(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|'
+        r'Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)(?:\s+\d{1,2}(?:st|nd|rd|th)?)?)(?:.*)$',
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    ).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned
+
+
+def extract_complainant_address(text: str) -> str | None:
+    """Extract the complainant's home/address phrase from the complaint text."""
+    patterns = [
+        r'\b(?:my address is|i live at|live at|i stay at|stay at|my home is|residing at|my house is)\s+(.+?)(?=\s+(?:on|at|near|around|today|yesterday|tonight|this morning|this evening|tomorrow|\d{1,2}(?:st|nd|rd|th)?\b)|$)',
+        r'\baddress\s*[:\-]\s*(.+?)(?=\s+(?:on|at|near|around|today|yesterday|tonight|this morning|this evening|tomorrow|\d{1,2}(?:st|nd|rd|th)?\b)|$)',
+    ]
+    for pat in patterns:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            candidate = clean_location_candidate(m.group(1).strip())
+            if candidate:
+                return candidate
+    return None
+
+
+def extract_incident_location(text: str) -> str | None:
+    """Extract the incident location from the complaint text."""
+    _MONTHS = (
+        r'Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|'
+        r'Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?'
+    )
+    patterns = [
+        r'\bon\s+(?:\d{1,2}(?:st|nd|rd|th)?\s+(?:' + _MONTHS + r')|(?:' + _MONTHS + r')\s+\d{1,2}(?:st|nd|rd|th)?)(?:,\s*\d{4})?\s+(?:at|near)\s+(.+?)(?=\s+(?:\d+\s+men|two\s+men|men|persons|snatched|stole|robbed|with|and|$))',
+        r'\bat\s+(?:\d{1,2}(?::\d{2})?\s*(?:am|pm)\s+)?(.+?)(?=\s+(?:\d+\s+men|two\s+men|men|persons|snatched|stole|robbed|with|and|$))',
+        r'\bnear\s+(.+?)(?=\s+(?:\d+\s+men|two\s+men|men|persons|snatched|stole|robbed|with|and|$))',
+    ]
+    for pat in patterns:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            candidate = clean_location_candidate(m.group(1).strip())
+            if candidate:
+                return candidate
+    return None
+
+
 def apply_ner_fields(text: str):
+    """
+    Run NER on (English) text and populate session state fields.
+
+    FIX — three improvements over the original:
+      1. Phone: regex fallback when NER CONTACT is empty.
+      2. Date:  extract_date_from_text now handles year-optional patterns.
+      3. Location: prefer fuller address (road/nagar token) over bare city;
+         also try a regex "live at / near <address>" before accepting NER result.
+    """
     if not text or not text.strip():
         return
+
+    text = normalize_transcribed_text(text)
+
+    # ── Date ────────────────────────────────────────────────────────
+    if st.session_state.auto_date == datetime.date.today():
+        extracted_date = extract_date_from_text(text)
+        if extracted_date:
+            st.session_state.auto_date = extracted_date
+
+    # ── NER tool ────────────────────────────────────────────────────
+    entities = {}
     try:
         entities = extract_entities(text)
     except Exception:
-        return
-    if entities.get("PERSON") and not st.session_state.auto_name:
-        st.session_state.auto_name = entities["PERSON"][0]
-    if entities.get("LOCATION") and not st.session_state.auto_location:
-        st.session_state.auto_location = entities["LOCATION"][0]
-    if entities.get("CONTACT") and not st.session_state.auto_contact:
-        st.session_state.auto_contact = entities["CONTACT"][0]
-    raw_date = (entities.get("DATE") or [None])[0]
-    if raw_date and st.session_state.auto_date == datetime.date.today():
-        try:
-            parsed = dateparser.parse(str(raw_date))
-            if parsed:
-                st.session_state.auto_date = parsed.date()
-        except Exception:
-            pass
+        pass
+
+    # ── Name ────────────────────────────────────────────────────────
+    if not st.session_state.auto_name:
+        ner_name = (entities.get("PERSON") or [None])[0]
+        if ner_name:
+            st.session_state.auto_name = ner_name
+        else:
+            # Fallback: "my name is <Name>"
+            m = re.search(
+                r'\bmy\s+name\s+is\s+([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+){0,2})',
+                text, re.IGNORECASE,
+            )
+            if m:
+                st.session_state.auto_name = m.group(1).strip().title()
+
+    # ── Address — complainant home address / residence ─────────────
+    if not st.session_state.auto_address:
+        address = extract_complainant_address(text)
+        if address:
+            st.session_state.auto_address = address.title()
+
+    # ── Location — prefer richer incident location over bare city ─────
+    if not st.session_state.auto_location:
+        incident_loc = extract_incident_location(text)
+        if incident_loc:
+            st.session_state.auto_location = incident_loc.title()
+
+    if not st.session_state.auto_location:
+        location_suffixes = [
+            "nagar", "road", "rd", "street", "st", "signal", "market",
+            "station", "colony", "area", "village", "town", "cross",
+            "layout", "park", "lane", "marg", "avenue", "block",
+            "chowk", "bazaar", "circle", "junction",
+        ]
+        sfx_pattern = '|'.join(location_suffixes)
+
+        # Priority 1: fallback address/location phrase with location suffix
+        addr_m = re.search(
+            r'(?:live[sd]?\s+at|stay(?:ing)?\s+at|residing\s+at|near|at|on)\s+'
+            r'([\w\s,/-]{2,60}?(?:' + sfx_pattern + r')(?:\s+[\w]+){0,3})',
+            text, re.IGNORECASE,
+        )
+        if addr_m:
+            candidate = clean_location_candidate(addr_m.group(1).strip())
+            if candidate:
+                st.session_state.auto_location = candidate.title()
+        else:
+            # Priority 2: NER result (already extracted)
+            ner_loc = (entities.get("LOCATION") or [None])[0]
+            if ner_loc:
+                candidate = clean_location_candidate(str(ner_loc).strip())
+                if candidate:
+                    st.session_state.auto_location = candidate.title()
+
+    # ── Contact — NER first, then Indian mobile regex fallback ──────
+    if not st.session_state.auto_contact:
+        ner_contact = (entities.get("CONTACT") or [None])[0]
+        if ner_contact:
+            st.session_state.auto_contact = ner_contact
+        else:
+            # Regex: Indian 10-digit mobile (optionally prefixed +91 / 0)
+            phone_m = re.search(
+                r'(?<!\d)(?:\+91[-\s]?|0)?([6-9]\d{9})(?!\d)',
+                text,
+            )
+            if phone_m:
+                st.session_state.auto_contact = phone_m.group(1)
+
+    # ── Date from NER (secondary) ───────────────────────────────────
+    if st.session_state.auto_date == datetime.date.today():
+        raw_date = (entities.get("DATE") or [None])[0]
+        if raw_date:
+            try:
+                parsed = dateparser.parse(str(raw_date), dayfirst=True)
+                if parsed:
+                    st.session_state.auto_date = parsed.date()
+            except Exception:
+                pass
+
+
+def process_description_multilingual(raw_text: str):
+    """
+    Central pipeline for any language input:
+      1. Detect source language
+      2. Translate to English if needed
+      3. Run classify_intent + apply_ner_fields on English text
+      4. Store both original and English versions in session state
+    Returns (english_text, detected_lang_code)
+    """
+    if not raw_text or not raw_text.strip():
+        return raw_text, "en"
+
+    detected_lang = detect_language(raw_text)
+
+    if detected_lang == "en":
+        english_text = raw_text
+    else:
+        english_text = translate_to_english(raw_text)
+
+    st.session_state.description          = english_text
+    st.session_state.original_description = raw_text
+    st.session_state.detected_lang        = detected_lang
+
+    st.session_state.incident_type = classify_intent(english_text)
+    apply_ner_fields(english_text)
+
+    return english_text, detected_lang
 
 
 # ╔══════════════════════════════════════════════════════════════════╗
@@ -609,10 +963,14 @@ def apply_ner_fields(text: str):
 
 _defaults = {
     "description": "",
+    "original_description": "",
+    "detected_lang": "en",
     "auto_name": "",
+    "auto_address": "",
     "auto_location": "",
     "auto_contact": "",
     "auto_date": datetime.date.today(),
+    "auto_register_date": datetime.date.today(),
     "incident_type": "Other",
     "fir_output": None,
     "fir_number": "",
@@ -624,7 +982,6 @@ _defaults = {
     "evidence_text": "",
     "witnesses_text": "",
     "editable_transcript": "",
-    # Live mic state: idle | captured | transcribed
     "mic_phase": "idle",
     "captured_audio_bytes": None,
     "captured_audio_mime": "audio/wav",
@@ -642,26 +999,22 @@ def ensure_recordings_dir() -> Path:
 
 # ╔══════════════════════════════════════════════════════════════════╗
 # ║               LIVE MICROPHONE — RENDER FUNCTION                 ║
-# ║  Clean single-widget approach using st.audio_input only        ║
 # ╚══════════════════════════════════════════════════════════════════╝
 
 def render_live_mic():
     phase = st.session_state.mic_phase
 
-    # ══════════════════════════════════════════════════════════════
-    # PHASE 1 — idle: show only the st.audio_input widget
-    # ══════════════════════════════════════════════════════════════
     if phase == "idle":
         st.markdown(
             '<p style="color:#8b9ab5;font-size:0.84rem;margin-bottom:12px;">'
             '🎙️ Click the <strong>microphone icon</strong> below to start recording. '
-            'Click it again to stop. Your recording will appear automatically.</p>',
+            'Click it again to stop. Speak in <strong>any language</strong> — translation is automatic.</p>',
             unsafe_allow_html=True,
         )
 
         try:
             audio_value = st.audio_input(
-                "🎤 Record your complaint",
+                "🎤 Record your complaint (any language)",
                 key="live_mic_widget",
             )
         except AttributeError:
@@ -682,9 +1035,6 @@ def render_live_mic():
             else:
                 st.error("⚠️ Recorded audio appears empty. Please try again.")
 
-    # ══════════════════════════════════════════════════════════════
-    # PHASE 2 — captured: playback + Transcribe button
-    # ══════════════════════════════════════════════════════════════
     elif phase == "captured":
         audio_bytes = st.session_state.captured_audio_bytes
         audio_mime  = st.session_state.captured_audio_mime or "audio/wav"
@@ -715,14 +1065,14 @@ def render_live_mic():
             transcribe_clicked = st.button(
                 "📝 Transcribe Audio",
                 key="btn_transcribe",
-                use_container_width=True,
+                width='stretch',
             )
 
         with col_rerecord:
             rerecord_clicked = st.button(
                 "🔄 Re-record",
                 key="btn_rerecord_captured",
-                use_container_width=True,
+                width='stretch',
             )
 
         if rerecord_clicked:
@@ -739,28 +1089,36 @@ def render_live_mic():
             elif not audio_bytes:
                 st.error("⚠️ No audio data. Please re-record.")
             else:
-                with st.spinner("🔄 Converting and transcribing… this may take a moment."):
+                with st.spinner("🔄 Converting and transcribing... this may take a moment."):
                     try:
                         wav_bytes = convert_audio_to_wav(audio_bytes, audio_mime)
-                        raw = transcribe_audio(wav_bytes)
+                        raw, transcription_meta = transcribe_audio(wav_bytes)
                     except Exception as exc:
                         raw = f"Transcription error: {exc}"
+                        transcription_meta = {"success": False, "error": str(exc)}
 
-                error_kw = ["error", "unavailable", "failed", "unclear"]
-                if any(kw in raw.lower() for kw in error_kw):
-                    st.error(f"⚠️ Transcription issue: {raw}")
+                if not transcription_meta.get("success", False):
+                    err_msg = transcription_meta.get("error", "Unknown error")
+                    st.error(f"⚠️ Transcription failed: {err_msg}")
                 else:
-                    english = translate_to_english(raw)
-                    st.session_state.raw_transcript      = english
-                    st.session_state.editable_transcript = english
-                    st.session_state.description         = english
+                    chunk_errors = transcription_meta.get("chunk_errors", 0)
+                    chunk_count  = transcription_meta.get("chunk_count", 1)
+                    if chunk_errors > 0:
+                        st.warning(
+                            f"⚠️ {chunk_errors} of {chunk_count} audio segment(s) could not be "
+                            f"recognised — the transcript below may be incomplete."
+                        )
+                    raw = normalize_transcribed_text(raw)
+                    st.session_state.raw_transcript      = raw
+                    st.session_state.editable_transcript = raw
                     st.session_state.mic_phase           = "transcribed"
                     st.rerun()
 
-    # ══════════════════════════════════════════════════════════════
-    # PHASE 3 — transcribed: editable text + Extract Details
-    # ══════════════════════════════════════════════════════════════
     elif phase == "transcribed":
+        detected = detect_language(st.session_state.editable_transcript)
+        if detected != "en":
+            ui_lang_badge(detected)
+
         st.markdown(
             '<div style="background:rgba(74,222,128,0.08);border:1px solid rgba(74,222,128,0.28);'
             'border-radius:10px;padding:12px 16px;color:#4ade80;font-size:0.88rem;'
@@ -785,7 +1143,6 @@ def render_live_mic():
         )
         if edited != st.session_state.editable_transcript:
             st.session_state.editable_transcript = edited
-            st.session_state.description = edited
 
         col_extract, col_new = st.columns([3, 1])
 
@@ -793,20 +1150,21 @@ def render_live_mic():
             extract_clicked = st.button(
                 "🔍 Extract Details & Auto-fill Form",
                 key="btn_extract_details",
-                use_container_width=True,
+                width='stretch',
             )
 
         with col_new:
             new_rec_clicked = st.button(
                 "🗑️ New Recording",
                 key="btn_new_recording",
-                use_container_width=True,
+                width='stretch',
             )
 
         if new_rec_clicked:
             for k in [
                 "mic_phase", "captured_audio_bytes", "captured_audio_mime",
                 "raw_transcript", "editable_transcript", "description",
+                "original_description", "detected_lang",
             ]:
                 st.session_state.pop(k, None)
             st.rerun()
@@ -816,10 +1174,10 @@ def render_live_mic():
             if not text:
                 st.warning("⚠️ Transcript is empty. Please add some text first.")
             else:
-                with st.spinner("🔍 Extracting name, date, location…"):
-                    st.session_state.description   = text
-                    st.session_state.incident_type = classify_intent(text)
-                    apply_ner_fields(text)
+                with st.spinner("🌐 Detecting language and extracting details..."):
+                    english_text, detected_lang = process_description_multilingual(text)
+                    if detected_lang != "en":
+                        ui_translation_notice(detected_lang, english_text)
                 st.success("✅ Form fields auto-filled! Scroll down to review Step 2.")
                 st.rerun()
 
@@ -869,7 +1227,7 @@ def build_html_export(report_text: str, photo_b64: str = "", photo_name: str = "
     <pre>{safe_report}</pre>
   </div>
   {photo_block}
-  <div class="footer">Computer-generated FIR · Requires officer verification & stamp.</div>
+  <div class="footer">Computer-generated FIR · Requires officer verification &amp; stamp.</div>
 </body>
 </html>"""
 
@@ -972,24 +1330,17 @@ def build_pdf_export(report_text: str, photo_b64: str = "", photo_name: str = ""
 def render_download_buttons(report_text: str, fir_num: str, photo_b64: str, photo_name: str, key_prefix: str):
     fmt = st.radio(
         "📥 Download format:",
-        ["TXT", "HTML (with photo)", "PDF (with photo)"],
+        ["TXT", "PDF (with photo)"],
         horizontal=True,
         key=f"fmt_{key_prefix}",
     )
     if fmt == "TXT":
         if photo_b64:
-            st.caption("⚠️ TXT cannot include the evidence photo. Choose HTML or PDF.")
+            st.caption("⚠️ TXT cannot include the evidence photo. Choose PDF instead.")
         st.download_button(
             "⬇️ Download TXT", report_text,
             file_name=f"{fir_num}.txt", mime="text/plain",
-            use_container_width=True, key=f"dl_{key_prefix}_txt",
-        )
-    elif fmt == "HTML (with photo)":
-        html_out = build_html_export(report_text, photo_b64, photo_name)
-        st.download_button(
-            "⬇️ Download HTML", html_out,
-            file_name=f"{fir_num}.html", mime="text/html",
-            use_container_width=True, key=f"dl_{key_prefix}_html",
+            width='stretch', key=f"dl_{key_prefix}_txt",
         )
     elif fmt == "PDF (with photo)":
         pdf_out = build_pdf_export(report_text, photo_b64, photo_name)
@@ -997,7 +1348,7 @@ def render_download_buttons(report_text: str, fir_num: str, photo_b64: str, phot
             st.download_button(
                 "⬇️ Download PDF", pdf_out,
                 file_name=f"{fir_num}.pdf", mime="application/pdf",
-                use_container_width=True, key=f"dl_{key_prefix}_pdf",
+                width='stretch', key=f"dl_{key_prefix}_pdf",
             )
 
 
@@ -1015,6 +1366,8 @@ selected_language, output_lang_code = ui_sidebar()
 
 ui_card_open("Describe the Incident", "1")
 
+ui_tip("💡 You can describe the incident in <strong>any Indian language or English</strong> — the system auto-detects and translates before processing.")
+
 input_mode = st.radio(
     "Input Method:",
     ["✍️ Type Complaint", "🎤 Voice Complaint"],
@@ -1030,16 +1383,14 @@ if input_mode == "🎤 Voice Complaint":
         key="voice_option_radio",
     )
 
-    # ── LIVE MICROPHONE ────────────────────────────────────────────
     if voice_option == "🎙️ Live Microphone":
         render_live_mic()
 
-    # ── UPLOAD AUDIO FILE ──────────────────────────────────────────
     else:
         if transcribe_audio is None:
             st.warning("⚠️ Run: pip install SpeechRecognition pydub")
         else:
-            ui_tip("Upload WAV, MP3, FLAC, OGG or M4A. Details will be auto-filled below.")
+            ui_tip("Upload WAV, MP3, FLAC, OGG or M4A. Speak in any language — auto-translated.")
             audio_file = st.file_uploader(
                 "Upload Audio File",
                 type=["wav", "mp3", "flac", "ogg", "m4a", "webm"],
@@ -1055,7 +1406,7 @@ if input_mode == "🎤 Voice Complaint":
                     if not audio_bytes:
                         st.error("⚠️ Uploaded file appears empty.")
                     else:
-                        with st.spinner("Converting and transcribing audio…"):
+                        with st.spinner("Converting and transcribing audio..."):
                             try:
                                 ext_mime_map = {
                                     "wav": "audio/wav", "mp3": "audio/mp3",
@@ -1066,25 +1417,38 @@ if input_mode == "🎤 Voice Complaint":
                                     audio_file.name.rsplit(".", 1)[-1].lower(),
                                     audio_file.type or "audio/webm"
                                 )
-                                wav_bytes  = convert_audio_to_wav(audio_bytes, src_mime)
-                                transcript = transcribe_audio(wav_bytes)
+                                wav_bytes = convert_audio_to_wav(audio_bytes, src_mime)
+                                transcript, transcript_meta = transcribe_audio(wav_bytes)
                             except Exception as exc:
                                 transcript = f"Transcription error: {exc}"
-                        _error_words = ["error", "unavailable", "failed", "unclear"]
-                        if any(w in transcript.lower() for w in _error_words):
-                            st.error(f"⚠️ {transcript}")
+                                transcript_meta = {"success": False, "error": str(exc)}
+
+                        if not transcript_meta.get("success", False):
+                            err_msg = transcript_meta.get("error", "Unknown error")
+                            st.error(f"⚠️ Transcription failed: {err_msg}")
                         else:
-                            english = translate_to_english(transcript)
-                            st.session_state.raw_transcript      = english
-                            st.session_state.editable_transcript = english
-                            st.session_state.description         = english
-                            st.session_state.incident_type       = classify_intent(english)
-                            apply_ner_fields(english)
+                            chunk_errors = transcript_meta.get("chunk_errors", 0)
+                            chunk_count  = transcript_meta.get("chunk_count", 1)
+                            if chunk_errors > 0:
+                                st.warning(
+                                    f"⚠️ {chunk_errors} of {chunk_count} audio segment(s) were unclear — "
+                                    f"transcript may be incomplete."
+                                )
+                            transcript = normalize_transcribed_text(transcript)
+                            st.session_state.raw_transcript      = transcript
+                            st.session_state.editable_transcript = transcript
+                            english_text, detected_lang = process_description_multilingual(transcript)
+                            if detected_lang != "en":
+                                ui_translation_notice(detected_lang, english_text)
                             st.rerun()
 
 # ── TRANSCRIPT DISPLAY (upload flow) ──────────────────────────────
 if input_mode == "🎤 Voice Complaint" and st.session_state.get("raw_transcript"):
     if st.session_state.get("voice_option_radio") == "📁 Upload Audio File":
+        detected = st.session_state.get("detected_lang", "en")
+        if detected != "en":
+            ui_lang_badge(detected)
+
         st.markdown("**📜 Transcript (edit if needed):**")
         edited = st.text_area(
             "✏️ Edit before extracting details:",
@@ -1093,44 +1457,58 @@ if input_mode == "🎤 Voice Complaint" and st.session_state.get("raw_transcript
             key="editable_transcript_area",
         )
         st.session_state.editable_transcript = edited
-        st.session_state.description = edited
+
         col_ext, col_clr = st.columns([3, 1])
         with col_ext:
-            if st.button("🔍 Extract Details & Auto-fill Form", key="extract_btn", use_container_width=True):
+            if st.button("🔍 Extract Details & Auto-fill Form", key="extract_btn", width='stretch'):
                 if not edited.strip():
                     st.warning("⚠️ Transcript is empty.")
                 else:
-                    with st.spinner("Extracting…"):
-                        st.session_state.description   = edited
-                        st.session_state.incident_type = classify_intent(edited)
-                        apply_ner_fields(edited)
+                    with st.spinner("🌐 Detecting language and extracting details..."):
+                        english_text, detected_lang = process_description_multilingual(edited)
+                        if detected_lang != "en":
+                            ui_translation_notice(detected_lang, english_text)
                     st.success("✅ Details extracted!")
                     st.rerun()
         with col_clr:
-            if st.button("🗑️ Clear", key="clear_transcript_btn", use_container_width=True):
-                st.session_state.raw_transcript      = ""
-                st.session_state.editable_transcript = ""
-                st.session_state.description         = ""
+            if st.button("🗑️ Clear", key="clear_transcript_btn", width='stretch'):
+                st.session_state.raw_transcript       = ""
+                st.session_state.editable_transcript  = ""
+                st.session_state.description          = ""
+                st.session_state.original_description = ""
+                st.session_state.detected_lang        = "en"
                 st.rerun()
 
 # ── TYPE COMPLAINT FLOW ────────────────────────────────────────────
 if input_mode == "✍️ Type Complaint":
+    current_detected = st.session_state.get("detected_lang", "en")
+    if current_detected != "en":
+        ui_lang_badge(current_detected)
+
     user_text = st.text_area(
-        "Describe the incident in detail",
+        "Describe the incident in detail (any language)",
         height=160,
         value=st.session_state.typed_complaint_saved,
-        placeholder="e.g. My name is Ramesh Kumar, on 1st April 2026 at MG Road, Bangalore…",
+        placeholder="My name is... I live at... On [date] at [time]...",
         key="typed_complaint",
     )
+
     if user_text and user_text.strip():
         st.session_state.typed_complaint_saved = user_text
-        english = translate_to_english(user_text)
-        st.session_state.description   = english
-        st.session_state.incident_type = classify_intent(english)
-        if st.button("🔍 Extract Details from Text", use_container_width=True):
-            with st.spinner("Extracting…"):
-                apply_ner_fields(english)
-                st.session_state.description = english
+
+        if st.button("🔍 Extract Details from Text", width='stretch'):
+            with st.spinner("🌐 Detecting language, translating and extracting details..."):
+                english_text, detected_lang = process_description_multilingual(user_text)
+
+            if detected_lang != "en":
+                ui_translation_notice(detected_lang, english_text)
+                st.markdown(
+                    '<p style="color:#8b9ab5;font-size:0.82rem;margin-top:6px;">'
+                    '📝 English translation used internally for NER and IPC matching. '
+                    'The FIR output language is set in the sidebar.</p>',
+                    unsafe_allow_html=True,
+                )
+
             st.success("✅ Details extracted!")
             st.rerun()
 
@@ -1150,11 +1528,14 @@ col1, col2 = st.columns(2)
 with col1:
     complainant = st.text_input("👤 Complainant Name *", key="auto_name")
     st.markdown("")
-    location    = st.text_input("📍 Incident Location *", key="auto_location")
+    address = st.text_input("🏠 Complainant Address *", key="auto_address")
+    st.markdown("")
+    location = st.text_input("📍 Incident Location *", key="auto_location")
 with col2:
     contact = st.text_input("📞 Contact Number", key="auto_contact")
     st.markdown("")
-    date    = st.date_input("📅 Incident Date *", key="auto_date")
+    incident_date = st.date_input("📅 Incident Date *", key="auto_date")
+    registration_date = st.date_input("📅 Complaint Registration Date *", key="auto_register_date")
 
 st.markdown("")
 auto_incident = st.session_state.get("incident_type", "Other")
@@ -1180,7 +1561,7 @@ with st.expander("➕ Evidence & Witnesses (optional)"):
     evidence_input = st.text_area(
         "🧾 Evidence Details", height=80,
         value=st.session_state.evidence_text,
-        placeholder="CCTV footage, bank statement, photos…",
+        placeholder="CCTV footage, bank statement, photos...",
         key="evidence_input",
     )
     st.session_state.evidence_text = evidence_input
@@ -1205,7 +1586,7 @@ with st.expander("➕ Evidence & Witnesses (optional)"):
             if photo_bytes:
                 st.session_state.photo_name = photo_file.name
                 st.session_state.photo_b64  = base64.b64encode(photo_bytes).decode("utf-8")
-                st.image(photo_bytes, caption=photo_file.name, use_container_width=True)
+                st.image(photo_bytes, caption=photo_file.name, width='stretch')
                 st.success(f"✅ Photo saved: {photo_file.name}")
             else:
                 st.warning("⚠️ Uploaded photo appears empty.")
@@ -1214,7 +1595,7 @@ with st.expander("➕ Evidence & Witnesses (optional)"):
     elif st.session_state.photo_b64:
         try:
             img_bytes = base64.b64decode(st.session_state.photo_b64)
-            st.image(img_bytes, caption=st.session_state.photo_name, use_container_width=True)
+            st.image(img_bytes, caption=st.session_state.photo_name, width='stretch')
         except Exception:
             st.session_state.photo_b64 = ""
 
@@ -1227,26 +1608,35 @@ st.markdown("")
 # ║                  LOGIC — GENERATE FIR                           ║
 # ╚══════════════════════════════════════════════════════════════════╝
 
-if st.button("🚀 Generate FIR", use_container_width=True):
+if st.button("🚀 Generate FIR", width='stretch'):
 
     if not st.session_state.auto_name or not st.session_state.auto_name.strip():
         st.error("⚠️ Complainant name is required.")
         st.stop()
-    if not st.session_state.description or not st.session_state.description.strip():
-        st.error("⚠️ Incident description is required.")
-        st.stop()
 
-    with st.spinner("Generating FIR…"):
+    description_for_processing = st.session_state.description
+    if not description_for_processing or not description_for_processing.strip():
+        raw_fallback = (
+            st.session_state.typed_complaint_saved
+            or st.session_state.editable_transcript
+            or ""
+        )
+        if not raw_fallback.strip():
+            st.error("⚠️ Incident description is required.")
+            st.stop()
+        description_for_processing, _ = process_description_multilingual(raw_fallback)
+
+    with st.spinner("Generating FIR..."):
         try:
-            ipc_matches = match_top_ipc(st.session_state.description, top_n=3)
+            ipc_matches = match_top_ipc(description_for_processing, top_n=3)
         except Exception:
             ipc_matches = []
 
         ipc_block  = format_ipc_for_fir(ipc_matches) if ipc_matches else "  Manual IPC review required."
         fir_number = generate_fir_number()
-        summary    = summarize_case(st.session_state.description)
+        summary    = summarize_case(description_for_processing)
 
-        clean_desc = st.session_state.description.strip().strip('"').strip("'")
+        clean_desc = description_for_processing.strip().strip('"').strip("'")
         try:
             narrative = ai_legal_rewrite(clean_desc, complainant=st.session_state.auto_name)
         except Exception as exc:
@@ -1281,13 +1671,16 @@ if st.button("🚀 Generate FIR", use_container_width=True):
             "fir_number":    fir_number,
             "complainant":   st.session_state.auto_name,
             "contact":       st.session_state.auto_contact,
+            "address":       st.session_state.auto_address,
             "location":      st.session_state.auto_location,
             "incident_date": str(st.session_state.auto_date),
+            "registration_date": str(st.session_state.auto_register_date),
             "incident_type": incident_type,
             "ipc_sections":  ipc_matches,
             "report":        final_output,
             "photo_b64":     st.session_state.get("photo_b64", ""),
             "photo_name":    st.session_state.get("photo_name", ""),
+            "input_language": st.session_state.get("detected_lang", "en"),
             "timestamp":     datetime.datetime.now().isoformat(),
         }
 
@@ -1320,7 +1713,7 @@ if st.session_state.get("fir_output"):
             st.image(
                 base64.b64decode(st.session_state.photo_b64),
                 caption=st.session_state.photo_name,
-                use_container_width=True,
+                width='stretch',
             )
         except Exception:
             st.warning("⚠️ Could not display attached photo.")
@@ -1335,7 +1728,7 @@ if st.session_state.get("fir_output"):
             key_prefix="main",
         )
     with col_save:
-        if st.button("💾 Save to Local Store", use_container_width=True):
+        if st.button("💾 Save to Local Store", width='stretch'):
             if st.session_state.get("fir_record"):
                 save_fir_record(st.session_state.fir_record)
                 st.success(f"✅ Saved to {DATA_FILE}")
@@ -1384,7 +1777,7 @@ with st.expander("📂 View Saved FIR Records"):
                             st.image(
                                 base64.b64decode(rec_pb64),
                                 caption=rec_pname or "Evidence",
-                                use_container_width=True,
+                                width='stretch',
                             )
                         except Exception:
                             st.warning("⚠️ Could not display saved evidence photo.")
@@ -1401,7 +1794,7 @@ with st.expander("📂 View Saved FIR Records"):
                                 key_prefix=f"saved_{i}",
                             )
                     with c2:
-                        if st.button("🗑 Delete", key=f"del_{i}", use_container_width=True):
+                        if st.button("🗑 Delete", key=f"del_{i}", width='stretch'):
                             target_num = record.get("fir_number")
                             data = [r for r in data if r.get("fir_number") != target_num]
                             try:

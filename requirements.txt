@@ -5,7 +5,6 @@
 
 streamlit
 streamlit-webrtc
-PyAV
 spacy
 nltk
 transformers
@@ -21,3 +20,10 @@ deep-translator
 python-dateutil
 SpeechRecognition
 pydub
+
+# LLM dependencies (keeping langchain and openai for other functionality)
+pydantic>=2.0
+openai>=1.0
+langchain>=0.1.0
+langchain-openai>=0.0.1
+langchain-community>=0.0.1
